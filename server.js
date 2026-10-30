@@ -43,7 +43,12 @@ app.use(cors({
 
 app.use(express.json({ limit: "20kb" }));
 
-// Serve frontend files from the "public" folder automatically
+// HEALTH CHECK ROUTE (Moved to top so it resolves instantly)
+app.get("/health", (req, res) => {
+  res.json({ status: "TradersCheem Backend is Running" });
+});
+
+// Serve static frontend files if placed in public folder
 app.use(express.static("public"));
 
 app.use(session({
@@ -74,7 +79,6 @@ async function createTables() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
-    -- Accounts table backing both DEMO and LIVE funds
     CREATE TABLE IF NOT EXISTS trading_accounts (
       id SERIAL PRIMARY KEY,
       user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -84,7 +88,6 @@ async function createTables() {
       UNIQUE(user_id, account_type)
     );
 
-    -- Unified trades history table
     CREATE TABLE IF NOT EXISTS trades (
       id SERIAL PRIMARY KEY,
       user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -106,11 +109,7 @@ function requireLogin(req, res, next) {
   next();
 }
 
-app.get("/health", (req, res) => {
-  res.json({ status: "TradersCheem Backend is Running" });
-});
-
-// REGISTER USER & INITIALIZE DEMO + LIVE ACCOUNTS
+// REGISTER USER
 app.post("/api/auth/register", async (req, res) => {
   try {
     const fullName = String(req.body.fullName || "").trim();
@@ -138,14 +137,12 @@ app.post("/api/auth/register", async (req, res) => {
 
       const user = userResult.rows[0];
 
-      // Create initial DEMO account ($100,000 balance)
       await client.query(
         `INSERT INTO trading_accounts (user_id, account_type, balance)
          VALUES ($1, 'DEMO', 100000.00)`,
         [user.id]
       );
 
-      // Create initial LIVE account ($0.00 balance)
       await client.query(
         `INSERT INTO trading_accounts (user_id, account_type, balance)
          VALUES ($1, 'LIVE', 0.00)`,
@@ -248,7 +245,7 @@ app.post("/api/auth/logout", requireLogin, (req, res) => {
   });
 });
 
-// GET BALANCES (DEMO & LIVE)
+// GET BALANCES
 app.get("/api/trading/balances", requireLogin, async (req, res) => {
   try {
     const result = await pool.query(
