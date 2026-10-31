@@ -144,9 +144,9 @@ app.post("/api/auth/register", async (req, res) => {
     const email = String(req.body.email || "").trim().toLowerCase();
     const password = String(req.body.password || "");
 
-    if (!fullName || !email || password.length < 10) {
+    if (!fullName || !email || password.length < 4) {
       return res.status(400).json({
-        error: "Enter your name, email and a password of at least 10 characters."
+        error: "Enter your name, email and a password of at least 4 characters."
       });
     }
 
