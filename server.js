@@ -1,7 +1,7 @@
+
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
 const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
@@ -12,11 +12,19 @@ require("dotenv").config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-if (!process.env.DATABASE_URL || !process.env.SESSION_SECRET) {
-  console.error("Missing DATABASE_URL or SESSION_SECRET");
+// REQUIRED ENVIRONMENT VARIABLES
+if (
+  !process.env.DATABASE_URL ||
+  !process.env.SESSION_SECRET ||
+  !process.env.RESEND_API_KEY
+) {
+  console.error(
+    "Missing DATABASE_URL, SESSION_SECRET or RESEND_API_KEY"
+  );
   process.exit(1);
 }
 
+// DATABASE
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production"
@@ -24,23 +32,15 @@ const pool = new Pool({
     : false
 });
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: process.env.SMTP_SECURE === "true",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-});
-
 app.set("trust proxy", 1);
 
+// FRONTEND URLS
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
   .map(origin => origin.trim())
   .filter(Boolean);
 
+// SECURITY
 app.use(helmet());
 
 app.use(cors({
@@ -48,6 +48,7 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
+
     callback(new Error("Origin not allowed"));
   },
   credentials: true
@@ -56,6 +57,7 @@ app.use(cors({
 app.use(express.json({ limit: "20kb" }));
 app.use(express.static("public"));
 
+// SESSION
 app.use(session({
   store: new pgSession({
     pool,
@@ -69,7 +71,9 @@ app.use(session({
   cookie: {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    sameSite: process.env.NODE_ENV === "production"
+      ? "none"
+      : "lax",
     maxAge: 1000 * 60 * 60 * 24
   }
 }));
@@ -80,7 +84,10 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ connected: true, status: "Backend is running" });
+  res.json({
+    connected: true,
+    status: "Backend is running"
+  });
 });
 
 // DATABASE TABLES
@@ -128,12 +135,14 @@ async function createTables() {
   `);
 }
 
+// LOGIN PROTECTION
 function requireLogin(req, res, next) {
   if (!req.session.userId) {
     return res.status(401).json({
       error: "Please log in first."
     });
   }
+
   next();
 }
 
@@ -141,7 +150,9 @@ function requireLogin(req, res, next) {
 app.post("/api/auth/register", async (req, res) => {
   try {
     const fullName = String(req.body.fullName || "").trim();
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
     const password = String(req.body.password || "");
 
     if (!fullName || !email || password.length < 4) {
@@ -159,7 +170,11 @@ app.post("/api/auth/register", async (req, res) => {
         `INSERT INTO users (full_name, email, password_hash)
          VALUES ($1, $2, $3)
          RETURNING id, full_name, email`,
-        [fullName, email, await bcrypt.hash(password, 12)]
+        [
+          fullName,
+          email,
+          await bcrypt.hash(password, 12)
+        ]
       );
 
       const user = result.rows[0];
@@ -177,7 +192,9 @@ app.post("/api/auth/register", async (req, res) => {
 
       req.session.save(error => {
         if (error) {
-          return res.status(500).json({ error: "Session creation failed." });
+          return res.status(500).json({
+            error: "Session creation failed."
+          });
         }
 
         res.status(201).json({
@@ -189,12 +206,14 @@ app.post("/api/auth/register", async (req, res) => {
           }
         });
       });
+
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
     } finally {
       client.release();
     }
+
   } catch (error) {
     if (error.code === "23505") {
       return res.status(409).json({
@@ -202,25 +221,34 @@ app.post("/api/auth/register", async (req, res) => {
       });
     }
 
-    console.error(error);
-    res.status(500).json({ error: "Registration failed." });
+    console.error("Registration error:", error.message);
+
+    res.status(500).json({
+      error: "Registration failed."
+    });
   }
 });
 
 // LOGIN
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
     const password = String(req.body.password || "");
 
     const result = await pool.query(
-      "SELECT id, full_name, email, password_hash FROM users WHERE email = $1",
+      `SELECT id, full_name, email, password_hash
+       FROM users WHERE email = $1`,
       [email]
     );
 
     if (
       !result.rows.length ||
-      !(await bcrypt.compare(password, result.rows[0].password_hash))
+      !(await bcrypt.compare(
+        password,
+        result.rows[0].password_hash
+      ))
     ) {
       return res.status(401).json({
         error: "Incorrect email or password."
@@ -231,14 +259,18 @@ app.post("/api/auth/login", async (req, res) => {
 
     req.session.regenerate(error => {
       if (error) {
-        return res.status(500).json({ error: "Login failed." });
+        return res.status(500).json({
+          error: "Login failed."
+        });
       }
 
       req.session.userId = user.id;
 
       req.session.save(error => {
         if (error) {
-          return res.status(500).json({ error: "Login failed." });
+          return res.status(500).json({
+            error: "Login failed."
+          });
         }
 
         res.json({
@@ -251,33 +283,39 @@ app.post("/api/auth/login", async (req, res) => {
         });
       });
     });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Login failed." });
+    console.error("Login error:", error.message);
+
+    res.status(500).json({
+      error: "Login failed."
+    });
   }
 });
 
-// FORGOT PASSWORD
+// FORGOT PASSWORD - RESEND
 app.post("/api/auth/forgot-password", async (req, res) => {
   const message =
     "If that email is registered, a password reset link will be sent.";
 
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
 
     if (!email) {
-      return res.status(400).json({ error: "Enter your email address." });
+      return res.status(400).json({
+        error: "Enter your email address."
+      });
     }
 
     const frontendUrl = (process.env.FRONTEND_URL || "")
-      .split(",")[0].trim().replace(/\/$/, "");
+      .split(",")[0]
+      .trim()
+      .replace(/\/$/, "");
 
-    if (
-      !frontendUrl ||
-      !process.env.SMTP_USER ||
-      !process.env.SMTP_PASS
-    ) {
-      throw new Error("Email configuration is missing.");
+    if (!frontendUrl) {
+      throw new Error("FRONTEND_URL is missing.");
     }
 
     const result = await pool.query(
@@ -291,15 +329,21 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 
     const user = result.rows[0];
 
+    // Create a secure random reset token.
     const token = crypto.randomBytes(32).toString("hex");
-    const tokenHash = crypto.createHash("sha256")
-      .update(token).digest("hex");
 
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+
+    // Remove previous reset links.
     await pool.query(
       "DELETE FROM password_resets WHERE user_id = $1",
       [user.id]
     );
 
+    // Save the hashed token for 30 minutes.
     await pool.query(
       `INSERT INTO password_resets
        (user_id, token_hash, expires_at)
@@ -310,18 +354,45 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     const resetLink =
       `${frontendUrl}/reset-password.html?token=${token}`;
 
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: user.email,
-      subject: "HassanFX Password Reset",
-      text:
-        `Use this link to reset your password. ` +
-        `It expires in 30 minutes:\n${resetLink}`
-    });
+    // Send email through Resend.
+    const emailResponse = await fetch(
+      "https://api.resend.com/emails",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: "TradersScheem <onboarding@resend.dev>",
+          to: [user.email],
+          subject: "HassanFX Password Reset",
+          text:
+            `Use this link to reset your password. ` +
+            `It expires in 30 minutes:\n\n${resetLink}`
+        })
+      }
+    );
+
+    const emailData = await emailResponse.json();
+
+    if (!emailResponse.ok) {
+      console.error("Resend error:", emailData);
+      throw new Error("Resend could not send the email.");
+    }
+
+    console.log(
+      "Password reset email accepted by Resend."
+    );
 
     res.json({ message });
+
   } catch (error) {
-    console.error("Forgot password error:", error.message);
+    console.error(
+      "Forgot password error:",
+      error.message
+    );
+
     res.status(500).json({
       error: "Could not send reset email. Please try again later."
     });
@@ -342,28 +413,38 @@ app.post("/api/auth/reset-password", async (req, res) => {
   let client;
 
   try {
-    const tokenHash = crypto.createHash("sha256")
-      .update(token).digest("hex");
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
 
     client = await pool.connect();
+
     await client.query("BEGIN");
 
     const result = await client.query(
-      `SELECT id, user_id FROM password_resets
-       WHERE token_hash = $1 AND expires_at > NOW()
+      `SELECT id, user_id
+       FROM password_resets
+       WHERE token_hash = $1
+       AND expires_at > NOW()
        FOR UPDATE`,
       [tokenHash]
     );
 
     if (!result.rows.length) {
       await client.query("ROLLBACK");
+
       return res.status(400).json({
         error: "This reset link is invalid or expired."
       });
     }
 
     const userId = result.rows[0].user_id;
-    const passwordHash = await bcrypt.hash(password, 12);
+
+    const passwordHash = await bcrypt.hash(
+      password,
+      12
+    );
 
     await client.query(
       "UPDATE users SET password_hash = $1 WHERE id = $2",
@@ -380,17 +461,25 @@ app.post("/api/auth/reset-password", async (req, res) => {
     res.json({
       message: "Password changed successfully. You can now log in."
     });
+
   } catch (error) {
     if (client) {
       await client.query("ROLLBACK").catch(() => {});
     }
 
-    console.error("Reset password error:", error.message);
+    console.error(
+      "Reset password error:",
+      error.message
+    );
+
     res.status(500).json({
       error: "Could not reset your password."
     });
+
   } finally {
-    if (client) client.release();
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -398,12 +487,15 @@ app.post("/api/auth/reset-password", async (req, res) => {
 app.get("/api/auth/me", requireLogin, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, full_name, email FROM users WHERE id = $1",
+      `SELECT id, full_name, email
+       FROM users WHERE id = $1`,
       [req.session.userId]
     );
 
     if (!result.rows.length) {
-      return res.status(404).json({ error: "User not found." });
+      return res.status(404).json({
+        error: "User not found."
+      });
     }
 
     const user = result.rows[0];
@@ -415,8 +507,11 @@ app.get("/api/auth/me", requireLogin, async (req, res) => {
         email: user.email
       }
     });
+
   } catch (error) {
-    res.status(500).json({ error: "Could not load account." });
+    res.status(500).json({
+      error: "Could not load account."
+    });
   }
 });
 
@@ -424,11 +519,16 @@ app.get("/api/auth/me", requireLogin, async (req, res) => {
 app.post("/api/auth/logout", requireLogin, (req, res) => {
   req.session.destroy(error => {
     if (error) {
-      return res.status(500).json({ error: "Logout failed." });
+      return res.status(500).json({
+        error: "Logout failed."
+      });
     }
 
     res.clearCookie("traderscheem.sid");
-    res.json({ message: "Logged out successfully." });
+
+    res.json({
+      message: "Logged out successfully."
+    });
   });
 });
 
@@ -437,46 +537,66 @@ app.get("/api/trading/balances", requireLogin, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT account_type, balance
-       FROM trading_accounts WHERE user_id = $1`,
+       FROM trading_accounts
+       WHERE user_id = $1`,
       [req.session.userId]
     );
 
-    const balances = { DEMO: 0, LIVE: 0 };
+    const balances = {
+      DEMO: 0,
+      LIVE: 0
+    };
 
     result.rows.forEach(row => {
       balances[row.account_type] = Number(row.balance);
     });
 
     res.json({ balances });
+
   } catch (error) {
-    res.status(500).json({ error: "Could not load balances." });
+    res.status(500).json({
+      error: "Could not load balances."
+    });
   }
 });
 
 // GET TRADE HISTORY
 app.get("/api/trading/trades", requireLogin, async (req, res) => {
   try {
-    const accountType = String(req.query.type || "DEMO").toUpperCase();
+    const accountType = String(
+      req.query.type || "DEMO"
+    ).toUpperCase();
 
     if (!["DEMO", "LIVE"].includes(accountType)) {
-      return res.status(400).json({ error: "Invalid account type." });
+      return res.status(400).json({
+        error: "Invalid account type."
+      });
     }
 
     const result = await pool.query(
-      `SELECT id, symbol, direction, stake, payout, result, created_at
+      `SELECT id, symbol, direction, stake,
+              payout, result, created_at
        FROM trades
-       WHERE user_id = $1 AND account_type = $2
-       ORDER BY created_at DESC LIMIT 100`,
+       WHERE user_id = $1
+       AND account_type = $2
+       ORDER BY created_at DESC
+       LIMIT 100`,
       [req.session.userId, accountType]
     );
 
-    res.json({ accountType, trades: result.rows });
+    res.json({
+      accountType,
+      trades: result.rows
+    });
+
   } catch (error) {
-    res.status(500).json({ error: "Could not load trade history." });
+    res.status(500).json({
+      error: "Could not load trade history."
+    });
   }
 });
 
-// REAL-MONEY TRADING IS NOT ENABLED
+// TRADING EXECUTION DISABLED
 app.post("/api/trading/trade", requireLogin, (req, res) => {
   res.status(403).json({
     error: "Trading execution is currently disabled."
@@ -485,24 +605,35 @@ app.post("/api/trading/trade", requireLogin, (req, res) => {
 
 // ERROR HANDLER
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: "Server error." });
+  console.error("Server error:", err.message);
+
+  res.status(500).json({
+    error: "Server error."
+  });
 });
 
 // START SERVER
 async function startServer() {
   try {
     await pool.query("SELECT NOW()");
+
     await createTables();
 
     app.listen(PORT, () => {
-      console.log(`TradersCheem backend running on port ${PORT}`);
+      console.log(
+        `TradersCheem backend running on port ${PORT}`
+      );
     });
+
   } catch (error) {
-    console.error("Backend startup failed:", error);
+    console.error(
+      "Backend startup failed:",
+      error
+    );
+
     process.exit(1);
   }
 }
 
 startServer();
-   
+  
