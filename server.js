@@ -229,69 +229,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-// LOGIN
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const email = String(req.body.email || "")
-      .trim()
-      .toLowerCase();
-    const password = String(req.body.password || "");
 
-    const result = await pool.query(
-      `SELECT id, full_name, email, password_hash
-       FROM users WHERE email = $1`,
-      [email]
-    );
-
-    if (
-      !result.rows.length ||
-      !(await bcrypt.compare(
-        password,
-        result.rows[0].password_hash
-      ))
-    ) {
-      return res.status(401).json({
-        error: "Incorrect email or password."
-      });
-    }
-
-    const user = result.rows[0];
-
-    req.session.regenerate(error => {
-      if (error) {
-        return res.status(500).json({
-          error: "Login failed."
-        });
-      }
-
-      req.session.userId = user.id;
-
-      req.session.save(error => {
-        if (error) {
-          return res.status(500).json({
-            error: "Login failed."
-          });
-        }
-
-        res.json({
-          message: "Login successful.",
-          user: {
-            id: user.id,
-            fullName: user.full_name,
-            email: user.email
-          }
-        });
-      });
-    });
-
-  } catch (error) {
-    console.error("Login error:", error.message);
-
-    res.status(500).json({
-      error: "Login failed."
-    });
-  }
-});
 
 // FORGOT PASSWORD - RESEND
 app.post("/api/auth/forgot-password", async (req, res) => {
