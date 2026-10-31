@@ -1,3 +1,4 @@
+const
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -19,13 +20,13 @@ if (!process.env.DATABASE_URL || !process.env.SESSION_SECRET) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.NODE_ENV === "production"
-      ? { rejectUnauthorized: false }
-      : false
+  ssl: process.env.NODE_ENV === "production"
+    ? { rejectUnauthorized: false }
+    : false
 });
+
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
   port: Number(process.env.SMTP_PORT || 587),
   secure: process.env.SMTP_SECURE === "true",
   auth: {
@@ -33,6 +34,7 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASS
   }
 });
+
 app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
@@ -42,70 +44,47 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
 
 app.use(helmet());
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Allows requests without an Origin header, such as direct browser testing
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      console.error("Blocked frontend origin:", origin);
-      return callback(new Error("Origin not allowed"));
-    },
-    credentials: true
-  })
-);
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    callback(new Error("Origin not allowed"));
+  },
+  credentials: true
+}));
 
 app.use(express.json({ limit: "20kb" }));
+app.use(express.static("public"));
 
-// Main backend test route
+app.use(session({
+  store: new pgSession({
+    pool,
+    tableName: "user_sessions",
+    createTableIfMissing: true
+  }),
+  name: "traderscheem.sid",
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    maxAge: 1000 * 60 * 60 * 24
+  }
+}));
+
+// HEALTH CHECK
 app.get("/", (req, res) => {
   res.send("TradersCheem backend is running");
 });
 
-// Health-check route
 app.get("/health", (req, res) => {
-  res.json({
-    connected: true,
-    status: "TradersCheem Backend is Running"
-  });
+  res.json({ connected: true, status: "Backend is running" });
 });
 
-// Optional alternative health URL
-app.get("/api/health", (req, res) => {
-  res.json({
-    connected: true,
-    status: "TradersCheem Backend is Running"
-  });
-});
-
-// Serve frontend files only if you have a public folder
-app.use(express.static("public"));
-
-app.use(
-  session({
-    store: new pgSession({
-      pool,
-      tableName: "user_sessions",
-      createTableIfMissing: true
-    }),
-    name: "traderscheem.sid",
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 1000 * 60 * 60 * 24
-    }
-  })
-);
+// DATABASE TABLES
 async function createTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -119,7 +98,8 @@ async function createTables() {
     CREATE TABLE IF NOT EXISTS trading_accounts (
       id SERIAL PRIMARY KEY,
       user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-      account_type VARCHAR(10) NOT NULL CHECK (account_type IN ('DEMO', 'LIVE')),
+      account_type VARCHAR(10) NOT NULL
+        CHECK (account_type IN ('DEMO', 'LIVE')),
       balance NUMERIC(15,2) NOT NULL DEFAULT 0.00,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(user_id, account_type)
@@ -128,12 +108,14 @@ async function createTables() {
     CREATE TABLE IF NOT EXISTS trades (
       id SERIAL PRIMARY KEY,
       user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-      account_type VARCHAR(10) NOT NULL CHECK (account_type IN ('DEMO', 'LIVE')),
+      account_type VARCHAR(10) NOT NULL
+        CHECK (account_type IN ('DEMO', 'LIVE')),
       symbol VARCHAR(30) NOT NULL,
       direction VARCHAR(10) NOT NULL,
       stake NUMERIC(15,2) NOT NULL,
       payout NUMERIC(15,2) DEFAULT 0.00,
-      result VARCHAR(20) NOT NULL CHECK (result IN ('WIN', 'LOSS', 'PENDING')),
+      result VARCHAR(20) NOT NULL
+        CHECK (result IN ('WIN', 'LOSS', 'PENDING')),
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -149,12 +131,14 @@ async function createTables() {
 
 function requireLogin(req, res, next) {
   if (!req.session.userId) {
-    return res.status(401).json({ error: "Please log in first." });
+    return res.status(401).json({
+      error: "Please log in first."
+    });
   }
   next();
 }
 
-// REGISTER USER
+// REGISTER
 app.post("/api/auth/register", async (req, res) => {
   try {
     const fullName = String(req.body.fullName || "").trim();
@@ -163,34 +147,28 @@ app.post("/api/auth/register", async (req, res) => {
 
     if (!fullName || !email || password.length < 10) {
       return res.status(400).json({
-        error: "Enter your name, valid email and a password of at least 10 characters."
+        error: "Enter your name, email and a password of at least 10 characters."
       });
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
     const client = await pool.connect();
 
     try {
       await client.query("BEGIN");
 
-      const userResult = await client.query(
+      const result = await client.query(
         `INSERT INTO users (full_name, email, password_hash)
          VALUES ($1, $2, $3)
          RETURNING id, full_name, email`,
-        [fullName, email, passwordHash]
+        [fullName, email, await bcrypt.hash(password, 12)]
       );
 
-      const user = userResult.rows[0];
+      const user = result.rows[0];
 
       await client.query(
-        `INSERT INTO trading_accounts (user_id, account_type, balance)
-         VALUES ($1, 'DEMO', 100000.00)`,
-        [user.id]
-      );
-
-      await client.query(
-        `INSERT INTO trading_accounts (user_id, account_type, balance)
-         VALUES ($1, 'LIVE', 0.00)`,
+        `INSERT INTO trading_accounts
+         (user_id, account_type, balance)
+         VALUES ($1, 'DEMO', 100000.00), ($1, 'LIVE', 0.00)`,
         [user.id]
       );
 
@@ -198,9 +176,19 @@ app.post("/api/auth/register", async (req, res) => {
 
       req.session.userId = user.id;
 
-      res.status(201).json({
-        message: "Account created successfully.",
-        user: { id: user.id, fullName: user.full_name, email: user.email }
+      req.session.save(error => {
+        if (error) {
+          return res.status(500).json({ error: "Session creation failed." });
+        }
+
+        res.status(201).json({
+          message: "Account created successfully.",
+          user: {
+            id: user.id,
+            fullName: user.full_name,
+            email: user.email
+          }
+        });
       });
     } catch (error) {
       await client.query("ROLLBACK");
@@ -210,7 +198,9 @@ app.post("/api/auth/register", async (req, res) => {
     }
   } catch (error) {
     if (error.code === "23505") {
-      return res.status(409).json({ error: "This email is already registered." });
+      return res.status(409).json({
+        error: "This email is already registered."
+      });
     }
 
     console.error(error);
@@ -225,7 +215,7 @@ app.post("/api/auth/login", async (req, res) => {
     const password = String(req.body.password || "");
 
     const result = await pool.query(
-      `SELECT id, full_name, email, password_hash FROM users WHERE email = $1`,
+      "SELECT id, full_name, email, password_hash FROM users WHERE email = $1",
       [email]
     );
 
@@ -233,22 +223,32 @@ app.post("/api/auth/login", async (req, res) => {
       !result.rows.length ||
       !(await bcrypt.compare(password, result.rows[0].password_hash))
     ) {
-      return res.status(401).json({ error: "Incorrect email or password." });
+      return res.status(401).json({
+        error: "Incorrect email or password."
+      });
     }
 
     const user = result.rows[0];
 
     req.session.regenerate(error => {
-      if (error) return res.status(500).json({ error: "Login failed." });
+      if (error) {
+        return res.status(500).json({ error: "Login failed." });
+      }
 
       req.session.userId = user.id;
 
       req.session.save(error => {
-        if (error) return res.status(500).json({ error: "Login failed." });
+        if (error) {
+          return res.status(500).json({ error: "Login failed." });
+        }
 
         res.json({
           message: "Login successful.",
-          user: { id: user.id, fullName: user.full_name, email: user.email }
+          user: {
+            id: user.id,
+            fullName: user.full_name,
+            email: user.email
+          }
         });
       });
     });
@@ -258,11 +258,148 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// FORGOT PASSWORD
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const message =
+    "If that email is registered, a password reset link will be sent.";
+
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+
+    if (!email) {
+      return res.status(400).json({ error: "Enter your email address." });
+    }
+
+    const frontendUrl = (process.env.FRONTEND_URL || "")
+      .split(",")[0].trim().replace(/\/$/, "");
+
+    if (
+      !frontendUrl ||
+      !process.env.SMTP_USER ||
+      !process.env.SMTP_PASS
+    ) {
+      throw new Error("Email configuration is missing.");
+    }
+
+    const result = await pool.query(
+      "SELECT id, email FROM users WHERE email = $1",
+      [email]
+    );
+
+    if (!result.rows.length) {
+      return res.json({ message });
+    }
+
+    const user = result.rows[0];
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256")
+      .update(token).digest("hex");
+
+    await pool.query(
+      "DELETE FROM password_resets WHERE user_id = $1",
+      [user.id]
+    );
+
+    await pool.query(
+      `INSERT INTO password_resets
+       (user_id, token_hash, expires_at)
+       VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`,
+      [user.id, tokenHash]
+    );
+
+    const resetLink =
+      `${frontendUrl}/reset-password.html?token=${token}`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: user.email,
+      subject: "HassanFX Password Reset",
+      text:
+        `Use this link to reset your password. ` +
+        `It expires in 30 minutes:\n${resetLink}`
+    });
+
+    res.json({ message });
+  } catch (error) {
+    console.error("Forgot password error:", error.message);
+    res.status(500).json({
+      error: "Could not send reset email. Please try again later."
+    });
+  }
+});
+
+// RESET PASSWORD
+app.post("/api/auth/reset-password", async (req, res) => {
+  const token = String(req.body.token || "");
+  const password = String(req.body.password || "");
+
+  if (!token || password.length < 10) {
+    return res.status(400).json({
+      error: "Enter a valid reset token and a password of at least 10 characters."
+    });
+  }
+
+  let client;
+
+  try {
+    const tokenHash = crypto.createHash("sha256")
+      .update(token).digest("hex");
+
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `SELECT id, user_id FROM password_resets
+       WHERE token_hash = $1 AND expires_at > NOW()
+       FOR UPDATE`,
+      [tokenHash]
+    );
+
+    if (!result.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: "This reset link is invalid or expired."
+      });
+    }
+
+    const userId = result.rows[0].user_id;
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await client.query(
+      "UPDATE users SET password_hash = $1 WHERE id = $2",
+      [passwordHash, userId]
+    );
+
+    await client.query(
+      "DELETE FROM password_resets WHERE user_id = $1",
+      [userId]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Password changed successfully. You can now log in."
+    });
+  } catch (error) {
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
+
+    console.error("Reset password error:", error.message);
+    res.status(500).json({
+      error: "Could not reset your password."
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 // CURRENT USER
 app.get("/api/auth/me", requireLogin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, full_name, email FROM users WHERE id = $1`,
+      "SELECT id, full_name, email FROM users WHERE id = $1",
       [req.session.userId]
     );
 
@@ -273,7 +410,11 @@ app.get("/api/auth/me", requireLogin, async (req, res) => {
     const user = result.rows[0];
 
     res.json({
-      user: { id: user.id, fullName: user.full_name, email: user.email }
+      user: {
+        id: user.id,
+        fullName: user.full_name,
+        email: user.email
+      }
     });
   } catch (error) {
     res.status(500).json({ error: "Could not load account." });
@@ -283,24 +424,28 @@ app.get("/api/auth/me", requireLogin, async (req, res) => {
 // LOGOUT
 app.post("/api/auth/logout", requireLogin, (req, res) => {
   req.session.destroy(error => {
-    if (error) return res.status(500).json({ error: "Logout failed." });
+    if (error) {
+      return res.status(500).json({ error: "Logout failed." });
+    }
 
     res.clearCookie("traderscheem.sid");
     res.json({ message: "Logged out successfully." });
   });
 });
 
-// GET BALANCES
+// GET ACCOUNT BALANCES
 app.get("/api/trading/balances", requireLogin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT account_type, balance FROM trading_accounts WHERE user_id = $1`,
+      `SELECT account_type, balance
+       FROM trading_accounts WHERE user_id = $1`,
       [req.session.userId]
     );
 
     const balances = { DEMO: 0, LIVE: 0 };
+
     result.rows.forEach(row => {
-      balances[row.account_type] = parseFloat(row.balance);
+      balances[row.account_type] = Number(row.balance);
     });
 
     res.json({ balances });
@@ -309,90 +454,10 @@ app.get("/api/trading/balances", requireLogin, async (req, res) => {
   }
 });
 
-// EXECUTE TRADE
-app.post("/api/trading/trade", requireLogin, async (req, res) => {
-  const accountType = (req.body.accountType || "DEMO").toUpperCase();
-  const symbol = String(req.body.symbol || "").trim();
-  const direction = String(req.body.direction || "").toUpperCase();
-  const stake = parseFloat(req.body.stake);
-  const resultType = String(req.body.result || "WIN").toUpperCase();
-  const profitMargin = 0.85;
-
-  if (!["DEMO", "LIVE"].includes(accountType)) {
-    return res.status(400).json({ error: "Invalid account type." });
-  }
-
-  if (!symbol || isNaN(stake) || stake <= 0) {
-    return res.status(400).json({ error: "Invalid trade symbol or stake amount." });
-  }
-
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const accountResult = await client.query(
-      `SELECT balance FROM trading_accounts 
-       WHERE user_id = $1 AND account_type = $2 FOR UPDATE`,
-      [req.session.userId, accountType]
-    );
-
-    if (!accountResult.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Trading account not found." });
-    }
-
-    const currentBalance = parseFloat(accountResult.rows[0].balance);
-
-    if (currentBalance < stake) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ error: "Insufficient funds for this trade." });
-    }
-
-    let payout = 0;
-    let balanceChange = -stake;
-
-    if (resultType === "WIN") {
-      payout = stake + (stake * profitMargin);
-      balanceChange = stake * profitMargin;
-    }
-
-    const updatedBalance = currentBalance + balanceChange;
-
-    await client.query(
-      `UPDATE trading_accounts 
-       SET balance = $1, updated_at = NOW() 
-       WHERE user_id = $2 AND account_type = $3`,
-      [updatedBalance, req.session.userId, accountType]
-    );
-
-    const tradeResult = await client.query(
-      `INSERT INTO trades (user_id, account_type, symbol, direction, stake, payout, result)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, symbol, direction, stake, payout, result, created_at`,
-      [req.session.userId, accountType, symbol, direction, stake, payout, resultType]
-    );
-
-    await client.query("COMMIT");
-
-    res.json({
-      message: "Trade executed successfully.",
-      newBalance: updatedBalance,
-      trade: tradeResult.rows[0]
-    });
-  } catch (error) {
-    await client.query("ROLLBACK");
-    console.error(error);
-    res.status(500).json({ error: "Trade execution failed." });
-  } finally {
-    client.release();
-  }
-});
-
 // GET TRADE HISTORY
 app.get("/api/trading/trades", requireLogin, async (req, res) => {
   try {
-    const accountType = (req.query.type || "DEMO").toUpperCase();
+    const accountType = String(req.query.type || "DEMO").toUpperCase();
 
     if (!["DEMO", "LIVE"].includes(accountType)) {
       return res.status(400).json({ error: "Invalid account type." });
@@ -402,8 +467,7 @@ app.get("/api/trading/trades", requireLogin, async (req, res) => {
       `SELECT id, symbol, direction, stake, payout, result, created_at
        FROM trades
        WHERE user_id = $1 AND account_type = $2
-       ORDER BY created_at DESC
-       LIMIT 100`,
+       ORDER BY created_at DESC LIMIT 100`,
       [req.session.userId, accountType]
     );
 
@@ -413,11 +477,20 @@ app.get("/api/trading/trades", requireLogin, async (req, res) => {
   }
 });
 
+// REAL-MONEY TRADING IS NOT ENABLED
+app.post("/api/trading/trade", requireLogin, (req, res) => {
+  res.status(403).json({
+    error: "Trading execution is currently disabled."
+  });
+});
+
+// ERROR HANDLER
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: "Server error." });
 });
 
+// START SERVER
 async function startServer() {
   try {
     await pool.query("SELECT NOW()");
@@ -433,3 +506,4 @@ async function startServer() {
 }
 
 startServer();
+   
