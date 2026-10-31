@@ -24,7 +24,15 @@ const pool = new Pool({
       ? { rejectUnauthorized: false }
       : false
 });
-
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: process.env.SMTP_SECURE === "true",
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  }
+});
 app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
@@ -126,6 +134,14 @@ async function createTables() {
       stake NUMERIC(15,2) NOT NULL,
       payout NUMERIC(15,2) DEFAULT 0.00,
       result VARCHAR(20) NOT NULL CHECK (result IN ('WIN', 'LOSS', 'PENDING')),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
