@@ -1,5 +1,7 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
