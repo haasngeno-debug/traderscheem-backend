@@ -333,9 +333,9 @@ app.post("/api/auth/reset-password", async (req, res) => {
   const token = String(req.body.token || "");
   const password = String(req.body.password || "");
 
-  if (!token || password.length < 10) {
+  if (!token || password.length < 4) {
     return res.status(400).json({
-      error: "Enter a valid reset token and a password of at least 10 characters."
+      error: "Enter a valid reset token and a password of at least 4 characters."
     });
   }
 
