@@ -17,9 +17,10 @@ if (!process.env.DATABASE_URL || !process.env.SESSION_SECRET) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production"
-    ? { rejectUnauthorized: false }
-    : false
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false
 });
 
 app.set("trust proxy", 1);
@@ -31,44 +32,70 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
 
 app.use(helmet());
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    callback(new Error("Origin not allowed"));
-  },
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allows requests without an Origin header, such as direct browser testing
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      console.error("Blocked frontend origin:", origin);
+      return callback(new Error("Origin not allowed"));
+    },
+    credentials: true
+  })
+);
 
 app.use(express.json({ limit: "20kb" }));
 
-// HEALTH CHECK ROUTE (Moved to top so it resolves instantly)
-app.get("/health", (req, res) => {
-  res.json({ status: "TradersCheem Backend is Running" });
+// Main backend test route
+app.get("/", (req, res) => {
+  res.send("TradersCheem backend is running");
 });
 
-// Serve static frontend files if placed in public folder
+// Health-check route
+app.get("/health", (req, res) => {
+  res.json({
+    connected: true,
+    status: "TradersCheem Backend is Running"
+  });
+});
+
+// Optional alternative health URL
+app.get("/api/health", (req, res) => {
+  res.json({
+    connected: true,
+    status: "TradersCheem Backend is Running"
+  });
+});
+
+// Serve frontend files only if you have a public folder
 app.use(express.static("public"));
 
-app.use(session({
-  store: new pgSession({
-    pool,
-    tableName: "user_sessions",
-    createTableIfMissing: true
-  }),
-  name: "traderscheem.sid",
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
-    maxAge: 1000 * 60 * 60 * 24
-  }
-}));
-
+app.use(
+  session({
+    store: new pgSession({
+      pool,
+      tableName: "user_sessions",
+      createTableIfMissing: true
+    }),
+    name: "traderscheem.sid",
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      maxAge: 1000 * 60 * 60 * 24
+    }
+  })
+);
 async function createTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
